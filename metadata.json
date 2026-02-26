@@ -1,0 +1,5 @@
+{
+  "name": "AccentMaster AI",
+  "description": "Perfect your French and Spanish accents with AI-powered voice analysis and personalized coaching.",
+  "requestFramePermissions": ["microphone"]
+}
