@@ -50,7 +50,27 @@ export interface SavedPassage {
 export interface PracticePrompt {
   text: string;
   translation: string;
-  vocabulary: { word: string; definition: string; englishEquivalent: string }[];
+  vocabulary: { word: string; definition: string; englishEquivalent: string; wordType: string }[];
+}
+
+export interface Flashcard {
+  id: string;
+  word: string;
+  definitionEn: string;
+  definitionTarget?: string;
+  wordType?: string;
+  practiceCount: number;
+  consecutiveCorrect: number;
+  frequency: number; // 1-5
+  language: Language;
+  dateAdded: string;
+  isCustom: boolean;
+}
+
+export interface FocusSession {
+  id: string;
+  date: string;
+  minutes: number;
 }
 
 export interface UserProfile {

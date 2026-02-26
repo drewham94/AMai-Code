@@ -6,6 +6,14 @@ export const SKILL_LEVELS: SkillLevel[] = ['Novice', 'Beginner', 'Intermediate',
 
 export const PRACTICE_FLAVORS: PracticeFlavor[] = ['Casual', 'Academic', 'Conversational', 'Professional', 'Creative'];
 
+export const QUICK_CONTEXTS = [
+  "Ordering at a cafe with a friend",
+  "Checking into a hotel at night",
+  "Asking for directions in a busy city",
+  "Shopping for groceries at a local market",
+  "Discussing weekend plans with a colleague"
+];
+
 export const ACCENTS: Record<Language, Accent[]> = {
   French: [
     { id: 'fr-paris', name: 'Parisian Style French', region: 'France' },
@@ -44,11 +52,11 @@ export const ACCENTS: Record<Language, Accent[]> = {
 };
 
 export const TTS_VOICES = [
-  { id: 'Puck', name: 'Puck (Youthful & Energetic)' },
-  { id: 'Charon', name: 'Charon (Deep & Authoritative)' },
-  { id: 'Kore', name: 'Kore (Soft & Clear)' },
-  { id: 'Fenrir', name: 'Fenrir (Warm & Friendly)' },
-  { id: 'Zephyr', name: 'Zephyr (Professional & Neutral)' },
+  { id: 'Puck', name: 'Voice 1' },
+  { id: 'Charon', name: 'Voice 2' },
+  { id: 'Kore', name: 'Voice 3' },
+  { id: 'Fenrir', name: 'Voice 4' },
+  { id: 'Zephyr', name: 'Voice 5' },
 ];
 
 export const REGIONAL_NAMES: Record<string, string[]> = {

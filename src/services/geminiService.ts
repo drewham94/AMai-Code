@@ -57,15 +57,18 @@ export async function generateAssistantResponse(
 export async function generateSlangPrompt(
   language: Language,
   accentName: string,
-  region: string
-): Promise<{ sentence: string; terms: { term: string; meaning: string }[] }> {
+  region: string,
+  passageContext: string = ""
+): Promise<{ sentence: string; terms: { term: string; meaning: string; wordType: string }[] }> {
+  const contextStr = passageContext ? `The scenario/context for the sentence should be: "${passageContext}".` : "";
   const prompt = `Generate a short, natural sentence in ${language} that uses 1-2 slang terms specific to the ${accentName} accent (Region: ${region}). 
+  ${contextStr}
   If the accent is very specific, use local slang. If not, use common ${language} slang.
   Highlight the slang terms in the sentence using **bold** text.
   
   Return the response in JSON format with:
   - sentence: the full sentence with bolded slang.
-  - terms: an array of objects, each with 'term' (the slang word) and 'meaning' (simple explanation in English).`;
+  - terms: an array of objects, each with 'term' (the slang word), 'meaning' (simple explanation in English), and 'wordType' (e.g., noun, verb, adjective, expression).`;
 
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
@@ -82,9 +85,10 @@ export async function generateSlangPrompt(
               type: Type.OBJECT,
               properties: {
                 term: { type: Type.STRING },
-                meaning: { type: Type.STRING }
+                meaning: { type: Type.STRING },
+                wordType: { type: Type.STRING }
               },
-              required: ["term", "meaning"]
+              required: ["term", "meaning", "wordType"]
             }
           }
         },
@@ -105,7 +109,9 @@ export async function generatePracticePrompt(
   language: Language,
   skillLevel: SkillLevel,
   flavor: PracticeFlavor,
-  mode: PracticeMode
+  mode: PracticeMode,
+  priorityFlashcards: { word: string; frequency: number }[] = [],
+  passageContext: string = ""
 ): Promise<PracticePrompt> {
   const levelDescriptions: Record<SkillLevel, string> = {
     'Novice': 'no experience, very simple words, very short phrases (3-5 words), basic sentence structure',
@@ -115,15 +121,23 @@ export async function generatePracticePrompt(
     'Expert': 'near-native fluency, highly technical or literary vocabulary, complex structures (18-25 words), subtle nuances'
   };
 
+  const priorityWordsStr = priorityFlashcards.length > 0 
+    ? `Try to incorporate some of these words if they fit the context (frequency indicates priority 1-5): ${priorityFlashcards.map(f => `${f.word} (freq: ${f.frequency})`).join(', ')}.`
+    : '';
+
+  const contextStr = passageContext ? `The specific scenario or context for this content is: "${passageContext}".` : "";
+
   const prompt = `Generate a ${mode === 'Read' ? 'phrase to read aloud' : 'open-ended question'} in ${language} for a ${skillLevel} learner. 
   The learner's level is ${skillLevel} (${levelDescriptions[skillLevel]}).
   IMPORTANT: Keep the sentence relatively short and slightly easier than the typical level to ensure success.
-  The context should be ${flavor}. 
+  The style/flavor should be ${flavor}. 
+  ${contextStr}
+  ${priorityWordsStr}
   
   Return the response in JSON format with:
   - text: the ${language} text.
   - translation: English translation. IMPORTANT: Highlight the English equivalents of the vocabulary words below by wrapping them in **bold** text within this translation string.
-  - vocabulary: an array of 2-3 advanced or interesting words from the text, each with 'word', 'definition' (in English), and 'englishEquivalent' (the specific word or phrase used in the translation).`;
+  - vocabulary: an array of 2-3 advanced or interesting words from the text, each with 'word', 'definition' (in English), 'englishEquivalent' (the specific word or phrase used in the translation), and 'wordType' (e.g., noun, verb, adjective).`;
 
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
@@ -142,9 +156,10 @@ export async function generatePracticePrompt(
               properties: {
                 word: { type: Type.STRING },
                 definition: { type: Type.STRING },
-                englishEquivalent: { type: Type.STRING }
+                englishEquivalent: { type: Type.STRING },
+                wordType: { type: Type.STRING }
               },
-              required: ["word", "definition", "englishEquivalent"]
+              required: ["word", "definition", "englishEquivalent", "wordType"]
             }
           }
         },
@@ -159,6 +174,21 @@ export async function generatePracticePrompt(
     console.error("Failed to parse practice prompt", e);
     throw new Error("Prompt generation failed");
   }
+}
+
+export async function translateDefinition(
+  definition: string,
+  targetLanguage: string
+): Promise<string> {
+  const prompt = `Translate the following English definition into natural ${targetLanguage}: "${definition}". 
+  Provide ONLY the translated text.`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+  });
+
+  return response.text || definition;
 }
 
 export async function analyzeSpeech(

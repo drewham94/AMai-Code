@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { UserProfile, PracticeSession, PracticeMode, SavedPassage, PracticeFlavor, SlangTerm, PracticePrompt, Language } from '../types';
-import { ACCENTS, TONGUE_TWISTERS, TTS_VOICES, ENGLISH_ACCENTS, LANGUAGES, PRACTICE_FLAVORS, SKILL_LEVELS, REGIONAL_NAMES } from '../constants';
+import { UserProfile, PracticeSession, PracticeMode, SavedPassage, PracticeFlavor, SlangTerm, PracticePrompt, Language, Flashcard, FocusSession } from '../types';
+import { ACCENTS, TONGUE_TWISTERS, TTS_VOICES, ENGLISH_ACCENTS, LANGUAGES, PRACTICE_FLAVORS, SKILL_LEVELS, REGIONAL_NAMES, QUICK_CONTEXTS } from '../constants';
 import { Recorder } from './Recorder';
-import { generatePracticePrompt, analyzeSpeech, generateSpeech, generateAssistantResponse, generateSlangPrompt } from '../services/geminiService';
+import { generatePracticePrompt, analyzeSpeech, generateSpeech, generateAssistantResponse, generateSlangPrompt, translateDefinition } from '../services/geminiService';
 import { 
   TrendingUp, 
   Award, 
@@ -20,7 +20,16 @@ import {
   Loader2,
   RefreshCw,
   Zap,
-  Library
+  Library,
+  Plus,
+  Rotate3d,
+  Languages as LanguagesIcon,
+  ThumbsUp,
+  ThumbsDown,
+  Trophy,
+  Timer,
+  Target,
+  Focus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -29,11 +38,46 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 interface DashboardProps {
   profile: UserProfile;
   sessions: PracticeSession[];
+  flashcards: Flashcard[];
+  focusSessions: FocusSession[];
   onNewSession: (session: PracticeSession) => void;
+  onAddFlashcard: (card: Flashcard) => void;
+  onUpdateFlashcards: (cards: Flashcard[]) => void;
+  onAddFocusSession: (session: FocusSession) => void;
 }
 
-export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSession }) => {
-  const [view, setView] = useState<'home' | 'practice' | 'reports' | 'history' | 'slang_bank'>('home');
+const LoadingPrompt = () => (
+  <div className="flex flex-col items-center justify-center py-12 space-y-6 w-full">
+    <div className="flex gap-3">
+      {[0, 1, 2].map((i) => (
+        <motion.div
+          key={i}
+          animate={{ 
+            y: [0, -15, 0],
+            opacity: [0.5, 1, 0.5],
+            scale: [1, 1.2, 1]
+          }}
+          transition={{ 
+            repeat: Infinity, 
+            duration: 0.8, 
+            delay: i * 0.15,
+            ease: "easeInOut" 
+          }}
+          className="w-4 h-4 bg-indigo-600 rounded-full shadow-lg shadow-indigo-200"
+        />
+      ))}
+    </div>
+    <div className="space-y-2 text-center">
+      <p className="text-sm font-black text-indigo-600 uppercase tracking-[0.2em] animate-pulse">
+        Generating Challenge
+      </p>
+      <p className="text-xs text-slate-400 font-medium">Gemini is crafting a custom prompt for you...</p>
+    </div>
+  </div>
+);
+
+export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, flashcards, focusSessions, onNewSession, onAddFlashcard, onUpdateFlashcards, onAddFocusSession }) => {
+  const [view, setView] = useState<'home' | 'practice' | 'reports' | 'history' | 'slang_bank' | 'flashcards'>('home');
   const [practiceMode, setPracticeMode] = useState<PracticeMode>('Read');
   const [currentPrompt, setCurrentPrompt] = useState('');
   const [currentPromptData, setCurrentPromptData] = useState<PracticePrompt | null>(null);
@@ -50,28 +94,90 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
   const [slangBank, setSlangBank] = useState<SlangTerm[]>([]);
   const [selectedFlavor, setSelectedFlavor] = useState<PracticeFlavor>(localProfile.preferredFlavor);
   const [currentSlangTerms, setCurrentSlangTerms] = useState<{ term: string; meaning: string }[]>([]);
+  const [passageContext, setPassageContext] = useState('');
+  const [isFlipped, setIsFlipped] = useState<Record<string, boolean>>({});
+  const [showTargetDefinition, setShowTargetDefinition] = useState<Record<string, boolean>>({});
+  const [isAddingFlashcard, setIsAddingFlashcard] = useState(false);
+  const [newFlashcard, setNewFlashcard] = useState({ word: '', definitionEn: '', wordType: 'noun' });
+  const [flashcardFilter, setFlashcardFilter] = useState<string>('All');
+  const [flashcardSort, setFlashcardSort] = useState<'date' | 'practice' | 'alphabetical'>('date');
+  const [showFlashcardStats, setShowFlashcardStats] = useState(false);
+  const [flashcardSubView, setFlashcardSubView] = useState<'library' | 'study'>('library');
+  const [studySession, setStudySession] = useState<{
+    cards: Flashcard[];
+    currentIndex: number;
+    maxCards: number;
+    isComplete: boolean;
+  } | null>(null);
+  const [studySettings, setStudySettings] = useState({ maxCards: 10 });
+  const [focusTimeRemaining, setFocusTimeRemaining] = useState<number | null>(null);
+  const [isFocusModeActive, setIsFocusModeActive] = useState(false);
+  const [showFocusPopup, setShowFocusPopup] = useState(false);
+  const [focusDuration, setFocusDuration] = useState<number>(10); // Default 10 mins
+  const [isFocusExpanded, setIsFocusExpanded] = useState(false);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isFocusModeActive && focusTimeRemaining !== null && focusTimeRemaining > 0) {
+      interval = setInterval(() => {
+        setFocusTimeRemaining(prev => (prev !== null ? prev - 1 : null));
+      }, 1000);
+    } else if (focusTimeRemaining === 0) {
+      handleFocusComplete();
+    }
+    return () => clearInterval(interval);
+  }, [isFocusModeActive, focusTimeRemaining]);
+
+  const handleFocusComplete = () => {
+    if (isFocusModeActive && focusDuration) {
+      onAddFocusSession({
+        id: Math.random().toString(36).substr(2, 9),
+        date: new Date().toISOString(),
+        minutes: focusDuration
+      });
+    }
+    setIsFocusModeActive(false);
+    setFocusTimeRemaining(null);
+  };
+
+  const startFocusSession = (mins: number) => {
+    setFocusDuration(mins);
+    setFocusTimeRemaining(mins * 60);
+    setIsFocusModeActive(true);
+    setShowFocusPopup(true);
+    setTimeout(() => setShowFocusPopup(false), 5000);
+  };
 
   useEffect(() => {
     fetchPassages();
     fetchSlang();
   }, []);
 
+  useEffect(() => {
+    if (currentPromptData?.vocabulary) {
+      currentPromptData.vocabulary.forEach(v => {
+        addFlashcardFromVocab(v.word, v.definition, v.wordType);
+      });
+    }
+  }, [currentPromptData]);
+
   const fetchSlang = async () => {
     try {
       const res = await fetch('/api/slang');
       const data = await res.json();
-      setSlangBank(data);
+      setSlangBank(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to fetch slang", err);
+      setSlangBank([]);
     }
   };
 
-  const saveSlang = async (terms: { term: string; meaning: string }[], example: string) => {
+  const saveSlang = async (terms: { term: string; meaning: string; wordType: string }[], example: string) => {
     const accent = ACCENTS[localProfile.targetLanguage].find(a => a.id === localProfile.targetAccent);
     
     for (const t of terms) {
       // Check if already in bank
-      if (slangBank.some(s => s.term.toLowerCase() === t.term.toLowerCase() && s.language === localProfile.targetLanguage)) {
+      if (safeSlangBank.some(s => s.term.toLowerCase() === t.term.toLowerCase() && s.language === localProfile.targetLanguage)) {
         continue;
       }
 
@@ -92,19 +198,45 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
           body: JSON.stringify(newSlang)
         });
         setSlangBank(prev => [newSlang, ...prev]);
+        
+        // Also add to flashcards
+        addFlashcardFromVocab(t.term, t.meaning, t.wordType);
       } catch (err) {
         console.error("Failed to save slang", err);
       }
     }
   };
 
+  const addFlashcardFromVocab = async (word: string, definitionEn: string, wordType?: string) => {
+    // Check if already exists
+    if (flashcards.some(f => f.word.toLowerCase() === word.toLowerCase() && f.language === localProfile.targetLanguage)) {
+      return;
+    }
+
+    const card: Flashcard = {
+      id: Math.random().toString(36).substr(2, 9),
+      word,
+      definitionEn,
+      wordType: wordType || 'expression',
+      practiceCount: 0,
+      consecutiveCorrect: 0,
+      frequency: 3,
+      language: localProfile.targetLanguage,
+      dateAdded: new Date().toISOString(),
+      isCustom: false
+    };
+
+    onAddFlashcard(card);
+  };
+
   const fetchPassages = async () => {
     try {
       const res = await fetch('/api/passages');
       const data = await res.json();
-      setSavedPassages(data);
+      setSavedPassages(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to fetch passages", err);
+      setSavedPassages([]);
     }
   };
 
@@ -167,6 +299,119 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
     } catch (err) {
       console.error("Failed to save settings", err);
       setShowSettings(false);
+    }
+  };
+
+  const handleToggleDefinitionLanguage = async (cardId: string) => {
+    const card = flashcards.find(f => f.id === cardId);
+    if (!card) return;
+
+    if (!showTargetDefinition[cardId]) {
+      // If we are switching to target language and don't have it yet, translate it
+      if (!card.definitionTarget) {
+        try {
+          const translated = await translateDefinition(card.definitionEn, card.language);
+          const updatedCards = flashcards.map(f => 
+            f.id === cardId ? { ...f, definitionTarget: translated } : f
+          );
+          onUpdateFlashcards(updatedCards);
+        } catch (err) {
+          console.error("Translation failed", err);
+        }
+      }
+    }
+    
+    setShowTargetDefinition(prev => ({ ...prev, [cardId]: !prev[cardId] }));
+  };
+
+  const handleManualAddFlashcard = () => {
+    if (!newFlashcard.word || !newFlashcard.definitionEn) return;
+
+    const card: Flashcard = {
+      id: Math.random().toString(36).substr(2, 9),
+      word: newFlashcard.word,
+      definitionEn: newFlashcard.definitionEn,
+      wordType: newFlashcard.wordType,
+      practiceCount: 0,
+      consecutiveCorrect: 0,
+      frequency: 3,
+      language: localProfile.targetLanguage,
+      dateAdded: new Date().toISOString(),
+      isCustom: true
+    };
+
+    onAddFlashcard(card);
+    setNewFlashcard({ word: '', definitionEn: '', wordType: 'noun' });
+    setIsAddingFlashcard(false);
+  };
+
+  const updateFlashcardFrequency = (cardId: string, frequency: number) => {
+    const updatedCards = flashcards.map(f => 
+      f.id === cardId ? { ...f, frequency } : f
+    );
+    onUpdateFlashcards(updatedCards);
+  };
+
+  const startStudySession = () => {
+    // Filter cards for current language and not mastered (consecutiveCorrect < 3)
+    const availableCards = flashcards.filter(f => 
+      f.language === localProfile.targetLanguage && 
+      f.consecutiveCorrect < 3
+    );
+
+    // Shuffle and pick up to maxCards
+    const shuffled = [...availableCards].sort(() => Math.random() - 0.5);
+    const sessionCards = shuffled.slice(0, studySettings.maxCards);
+
+    setStudySession({
+      cards: sessionCards,
+      currentIndex: 0,
+      maxCards: sessionCards.length,
+      isComplete: false
+    });
+    setFlashcardSubView('study');
+    setIsFlipped({}); // Reset flips
+  };
+
+  const handleStudyFeedback = (cardId: string, isCorrect: boolean) => {
+    if (!studySession) return;
+
+    const card = flashcards.find(f => f.id === cardId);
+    if (!card) return;
+
+    let newConsecutive = isCorrect ? card.consecutiveCorrect + 1 : 0;
+    let newFrequency = card.frequency;
+
+    if (isCorrect) {
+      if (newConsecutive === 1) newFrequency = 3; // Average
+      else if (newConsecutive === 2) newFrequency = 2; // Less frequent
+      else if (newConsecutive >= 3) newFrequency = 1; // Mastered (will be excluded next time)
+    } else {
+      newFrequency = 5; // More frequent
+    }
+
+    const updatedFlashcards = flashcards.map(f => 
+      f.id === cardId ? { 
+        ...f, 
+        consecutiveCorrect: newConsecutive, 
+        frequency: newFrequency,
+        practiceCount: f.practiceCount + 1 
+      } : f
+    );
+    onUpdateFlashcards(updatedFlashcards);
+
+    // Move to next card or complete
+    if (studySession.currentIndex < studySession.cards.length - 1) {
+      setStudySession({
+        ...studySession,
+        currentIndex: studySession.currentIndex + 1
+      });
+      setIsFlipped({}); // Reset flip for next card
+    } else {
+      setStudySession({
+        ...studySession,
+        isComplete: true
+      });
     }
   };
 
@@ -270,24 +515,36 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
       setCurrentPromptData(null);
     } else {
       setIsGenerating(true);
+      setCurrentPrompt('');
+      setCurrentPromptData(null);
+      setCurrentSlangTerms([]);
       try {
         if (mode === 'Slang') {
           const accent = ACCENTS[activeProfile.targetLanguage].find(a => a.id === activeProfile.targetAccent);
           const slangData = await generateSlangPrompt(
             activeProfile.targetLanguage,
             accent?.name || activeProfile.targetLanguage,
-            accent?.region || ''
+            accent?.region || '',
+            passageContext
           );
           setCurrentPrompt(slangData.sentence);
           setCurrentSlangTerms(slangData.terms);
           setCurrentPromptData(null);
           await saveSlang(slangData.terms, slangData.sentence);
         } else {
+          const priorityCards = flashcards
+            .filter(f => f.language === activeProfile.targetLanguage)
+            .sort((a, b) => b.frequency - a.frequency)
+            .slice(0, 5)
+            .map(f => ({ word: f.word, frequency: f.frequency }));
+
           const promptData = await generatePracticePrompt(
             activeProfile.targetLanguage,
             activeProfile.skillLevel,
             selectedFlavor,
-            mode
+            mode,
+            priorityCards,
+            passageContext
           );
           setCurrentPrompt(promptData.text);
           setCurrentPromptData(promptData);
@@ -349,6 +606,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
         }
       };
 
+      // Increment practice count for flashcards in this prompt
+      const updatedFlashcards = flashcards.map(f => {
+        if (f.language === localProfile.targetLanguage && currentPrompt.toLowerCase().includes(f.word.toLowerCase())) {
+          return { ...f, practiceCount: f.practiceCount + 1 };
+        }
+        return f;
+      });
+      onUpdateFlashcards(updatedFlashcards);
+
       setLastFeedback(newSession);
       onNewSession(newSession);
 
@@ -407,12 +673,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
     return regionalNames[voiceIndex] || voiceId;
   };
 
-  const averageScore = sessions.length > 0 
-    ? Math.round(sessions.reduce((acc, s) => acc + s.score, 0) / sessions.length) 
+  const safeSessions = Array.isArray(sessions) ? sessions : [];
+  const safeSavedPassages = Array.isArray(savedPassages) ? savedPassages : [];
+  const safeSlangBank = Array.isArray(slangBank) ? slangBank : [];
+
+  const averageScore = safeSessions.length > 0 
+    ? Math.round(safeSessions.reduce((acc, s) => acc + s.score, 0) / safeSessions.length) 
     : 0;
 
   const chartData = Object.values(
-    sessions.reduce((acc, s) => {
+    safeSessions.reduce((acc, s) => {
       const dateStr = new Date(s.date).toLocaleDateString([], { month: 'short', day: 'numeric' });
       if (!acc[dateStr]) {
         acc[dateStr] = { date: dateStr, totalScore: 0, count: 0, timestamp: new Date(s.date).getTime() };
@@ -429,10 +699,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
     }));
 
   const calculateStreak = () => {
-    if (sessions.length === 0) return 0;
+    if (safeSessions.length === 0) return 0;
 
     const uniqueDates = Array.from(new Set(
-      sessions.map(s => {
+      safeSessions.map(s => {
         const d = new Date(s.date);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       })
@@ -469,37 +739,176 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
 
   const currentStreak = calculateStreak();
 
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const safeFocusSessions = Array.isArray(focusSessions) ? focusSessions : [];
+  const todayFocusMinutes = safeFocusSessions
+    .filter(s => {
+      const d = new Date(s.date);
+      const today = new Date();
+      return d.toDateString() === today.toDateString();
+    })
+    .reduce((acc, s) => acc + s.minutes, 0);
+
   return (
-    <div className="min-h-screen bg-slate-50 pb-24">
+    <div className={`min-h-screen bg-slate-50 pb-24 transition-all duration-500 ${isFocusModeActive ? 'ring-[12px] ring-indigo-600 ring-inset' : ''}`}>
+      {/* Focus Overlay Note */}
+      {isFocusModeActive && (
+        <div className="fixed top-0 left-1/2 -translate-x-1/2 z-[100] bg-indigo-600 text-white px-6 py-1 rounded-b-xl font-black text-[10px] uppercase tracking-[0.3em] shadow-lg">
+          Focus
+        </div>
+      )}
+
+      {/* Focus Popup */}
+      <AnimatePresence>
+        {showFocusPopup && (
+          <motion.div
+            initial={{ opacity: 0, y: -50 }}
+            animate={{ opacity: 1, y: 20 }}
+            exit={{ opacity: 0, y: -50 }}
+            className="fixed top-12 left-1/2 -translate-x-1/2 z-[110] bg-white p-6 rounded-3xl shadow-2xl border border-indigo-100 max-w-xs w-full text-center space-y-3"
+          >
+            <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600 mx-auto">
+              <Target size={24} />
+            </div>
+            <h4 className="text-lg font-bold text-slate-900">Focus Activated</h4>
+            <p className="text-slate-500 text-xs leading-relaxed">
+              100% focus accelerates language learning by strengthening neural pathways and improving memory retention.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="bg-white border-b border-slate-100 px-6 py-8 sticky top-0 z-20">
-        <div className="max-w-2xl mx-auto flex justify-between items-center">
-          <div className="flex flex-col">
-            <h1 className="text-2xl font-bold text-slate-900">Hello, {localProfile.name}!</h1>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-lg text-[10px] font-bold uppercase tracking-wider">
-                {localProfile.skillLevel}
-              </span>
-              <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
-                <Volume2 size={10} /> {getVoiceName(localProfile.preferredVoice, localProfile.targetAccent)}
-              </span>
-              <span className="text-slate-400 text-[10px] font-medium ml-1">
-                {ACCENTS[localProfile.targetLanguage].find(a => a.id === localProfile.targetAccent)?.name}
-              </span>
+        <div className="max-w-2xl mx-auto space-y-6">
+          <div className="flex justify-between items-center">
+            <div className="flex flex-col">
+              <h1 className="text-2xl font-bold text-slate-900">Hello, {localProfile.name}!</h1>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                  {localProfile.skillLevel}
+                </span>
+                <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                  <Volume2 size={10} /> {getVoiceName(localProfile.preferredVoice, localProfile.targetAccent)}
+                </span>
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => {
-                setStagedProfile(localProfile);
-                setShowSettings(true);
-              }}
-              className="p-3 bg-slate-50 text-slate-600 rounded-2xl hover:bg-slate-100 transition-colors"
-            >
-              <Settings size={20} />
-            </button>
-            <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-indigo-100">
-              {localProfile.name[0]}
+            <div className="flex items-center gap-3">
+              {/* Compact Focus Pill */}
+              <div className="relative">
+                <button 
+                  onClick={() => setIsFocusExpanded(!isFocusExpanded)}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-2xl transition-all border ${
+                    isFocusModeActive 
+                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-200 animate-pulse' 
+                      : todayFocusMinutes >= 30 
+                        ? 'bg-emerald-50 text-emerald-600 border-emerald-100' 
+                        : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'
+                  }`}
+                >
+                  {todayFocusMinutes >= 30 && !isFocusModeActive ? <CheckCircle2 size={16} /> : <Focus size={16} />}
+                  <span className="text-xs font-bold tabular-nums">
+                    {isFocusModeActive ? formatTime(focusTimeRemaining || 0) : `${todayFocusMinutes}m`}
+                  </span>
+                </button>
+
+                {/* Focus Dropdown */}
+                <AnimatePresence>
+                  {isFocusExpanded && (
+                    <>
+                      <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-30"
+                        onClick={() => setIsFocusExpanded(false)}
+                      />
+                      <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                        className="absolute right-0 mt-2 w-64 bg-white rounded-3xl shadow-2xl border border-slate-100 p-5 z-40 space-y-4"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex justify-between items-center">
+                            <h4 className="text-sm font-bold text-slate-900">Focus Attention</h4>
+                            {todayFocusMinutes >= 30 && (
+                              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded text-[8px] font-black uppercase tracking-wider">
+                                Goal Met
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-500 leading-relaxed">
+                            {isFocusModeActive 
+                              ? "Stay focused! Neural pathways are strengthening." 
+                              : "Switch gears and fully focus on your practice."}
+                          </p>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-end">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Progress</span>
+                            <span className="text-[10px] font-bold text-slate-900">{todayFocusMinutes}/30m</span>
+                          </div>
+                          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${Math.min((todayFocusMinutes / 30) * 100, 100)}%` }}
+                              className={`h-full transition-all ${todayFocusMinutes >= 30 ? 'bg-emerald-500' : 'bg-indigo-600'}`}
+                            />
+                          </div>
+                        </div>
+
+                        {isFocusModeActive ? (
+                          <button 
+                            onClick={() => {
+                              setIsFocusModeActive(false);
+                              setFocusTimeRemaining(null);
+                              setIsFocusExpanded(false);
+                            }}
+                            className="w-full py-3 bg-rose-50 text-rose-600 rounded-xl text-[10px] font-bold uppercase tracking-wider border border-rose-100 hover:bg-rose-100 transition-colors"
+                          >
+                            End Session
+                          </button>
+                        ) : (
+                          <div className="grid grid-cols-3 gap-2">
+                            {[5, 10, 15].map(mins => (
+                              <button
+                                key={mins}
+                                onClick={() => {
+                                  startFocusSession(mins);
+                                  setIsFocusExpanded(false);
+                                }}
+                                className="py-2 bg-slate-50 text-slate-600 rounded-xl text-[10px] font-bold uppercase tracking-wider border border-slate-100 hover:border-indigo-200 hover:text-indigo-600 transition-all"
+                              >
+                                {mins}m
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </motion.div>
+                    </>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              <button 
+                onClick={() => {
+                  setStagedProfile(localProfile);
+                  setShowSettings(true);
+                }}
+                className="p-3 bg-slate-50 text-slate-600 rounded-2xl hover:bg-slate-100 transition-colors"
+              >
+                <Settings size={20} />
+              </button>
+              <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-indigo-100">
+                {localProfile.name[0]}
+              </div>
             </div>
           </div>
         </div>
@@ -658,8 +1067,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                   <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-600 mb-4">
                     <Award size={20} />
                   </div>
-                  <div className="text-3xl font-bold text-slate-900">{sessions.length}</div>
+                  <div className="text-3xl font-bold text-slate-900">{safeSessions.length}</div>
                   <div className="text-xs text-slate-500 font-medium uppercase tracking-wider mt-1">Sessions Completed</div>
+                </div>
+                <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm col-span-2 flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white">
+                      <Focus size={20} />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-slate-900">{todayFocusMinutes}m</div>
+                      <div className="text-xs text-slate-500 font-medium uppercase tracking-wider">Focused Today</div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Daily Goal</div>
+                    <div className="text-[10px] text-slate-400 font-medium">30m recommended</div>
+                  </div>
                 </div>
               </div>
 
@@ -726,6 +1150,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                       <div>
                         <div className="text-slate-900 font-bold text-lg">Slang Bank</div>
                         <div className="text-slate-500 text-sm">Review learned vocabulary</div>
+                      </div>
+                    </div>
+                    <ChevronLeft size={20} className="text-slate-300 rotate-180 group-hover:translate-x-1 transition-transform" />
+                  </button>
+
+                  <button 
+                    onClick={() => setView('flashcards')}
+                    className="group bg-white p-6 rounded-3xl text-left flex items-center justify-between border border-slate-100 shadow-sm hover:border-indigo-200 transition-all"
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600">
+                        <Rotate3d size={24} />
+                      </div>
+                      <div>
+                        <div className="text-slate-900 font-bold text-lg">Flashcards</div>
+                        <div className="text-slate-500 text-sm">Study your vocabulary</div>
                       </div>
                     </div>
                     <ChevronLeft size={20} className="text-slate-300 rotate-180 group-hover:translate-x-1 transition-transform" />
@@ -804,7 +1244,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                   <div className="lg:col-span-1 space-y-4 order-2 lg:order-1">
                     <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest px-2">Previous Passages</h3>
                     <div className="space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-                      {savedPassages.filter(p => p.language === localProfile.targetLanguage).map((passage) => (
+                      {safeSavedPassages.filter(p => p.language === localProfile.targetLanguage).map((passage) => (
                         <button
                           key={passage.id}
                           onClick={() => setCurrentPrompt(passage.text)}
@@ -822,7 +1262,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                           </p>
                         </button>
                       ))}
-                      {savedPassages.length === 0 && (
+                      {safeSavedPassages.length === 0 && (
                         <div className="p-4 text-center text-slate-400 text-xs italic">
                           No saved passages yet.
                         </div>
@@ -832,22 +1272,63 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                 )}
 
                 <div className={`${practiceMode === 'Read' ? 'lg:col-span-3' : ''} space-y-8 order-1 lg:order-2`}>
-                  <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-4">
-                    <label className="text-xs font-bold text-slate-400 uppercase tracking-widest px-1">Passage Subject</label>
-                    <div className="flex flex-wrap gap-2">
-                      {PRACTICE_FLAVORS.map(flavor => (
-                        <button
-                          key={flavor}
-                          onClick={() => setSelectedFlavor(flavor)}
-                          className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-                            selectedFlavor === flavor 
-                              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' 
-                              : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
-                          }`}
-                        >
-                          {flavor}
-                        </button>
-                      ))}
+                  <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-6">
+                    <div className="space-y-4">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest px-1">Passage Style</label>
+                      <div className="flex flex-wrap gap-2">
+                        {PRACTICE_FLAVORS.map(flavor => (
+                          <button
+                            key={flavor}
+                            onClick={() => setSelectedFlavor(flavor)}
+                            className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                              selectedFlavor === flavor 
+                                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' 
+                                : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            {flavor}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest px-1">Passage Context</label>
+                      <div className="space-y-3">
+                        <div className="relative">
+                          <input 
+                            type="text"
+                            value={passageContext}
+                            onChange={(e) => {
+                              const words = e.target.value.trim().split(/\s+/).filter(Boolean);
+                              if (words.length <= 20 || e.target.value.length < passageContext.length) {
+                                setPassageContext(e.target.value);
+                              }
+                            }}
+                            placeholder="Describe a scenario (e.g. 'Ordering at a cafe')"
+                            className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+                          />
+                          <div className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-300 uppercase">
+                            {passageContext.trim().split(/\s+/).filter(Boolean).length}/20 words
+                          </div>
+                        </div>
+                        
+                        <div className="flex flex-wrap gap-2">
+                          {QUICK_CONTEXTS.map(ctx => (
+                            <button
+                              key={ctx}
+                              onClick={() => setPassageContext(ctx)}
+                              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${
+                                passageContext === ctx 
+                                  ? 'bg-indigo-100 text-indigo-700 border-indigo-200' 
+                                  : 'bg-white text-slate-500 border border-slate-100 hover:bg-slate-50'
+                              }`}
+                            >
+                              {ctx}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -859,44 +1340,50 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                       {isGenerating && <div className="text-xs text-slate-400 animate-pulse">Generating prompt...</div>}
                     </div>
 
-                    <div className="min-h-[120px] flex flex-col items-center justify-center text-center gap-4">
-                      <div className="text-2xl md:text-3xl font-bold text-slate-900 leading-tight">
-                        {renderHighlightedText(currentPrompt || "...", currentPromptData?.vocabulary || [])}
-                      </div>
-                      
-                      {currentPromptData && (
-                        <div className="space-y-4 w-full">
-                          <button 
-                            onClick={() => setShowTranslation(!showTranslation)}
-                            className="text-xs font-bold text-indigo-600 uppercase tracking-widest hover:text-indigo-800 transition-colors"
-                          >
-                            {showTranslation ? 'Hide Translation' : 'Show Translation'}
-                          </button>
-                          {showTranslation && (
-                            <div className="text-sm text-slate-400 italic max-w-md mx-auto">
-                              <ReactMarkdown>{currentPromptData.translation}</ReactMarkdown>
+                    <div className="min-h-[160px] flex flex-col items-center justify-center text-center gap-4">
+                      {isGenerating ? (
+                        <LoadingPrompt />
+                      ) : (
+                        <>
+                          <div className="text-2xl md:text-3xl font-bold text-slate-900 leading-tight">
+                            {renderHighlightedText(currentPrompt || "...", currentPromptData?.vocabulary || [])}
+                          </div>
+                          
+                          {currentPromptData && (
+                            <div className="space-y-4 w-full">
+                              <button 
+                                onClick={() => setShowTranslation(!showTranslation)}
+                                className="text-xs font-bold text-indigo-600 uppercase tracking-widest hover:text-indigo-800 transition-colors"
+                              >
+                                {showTranslation ? 'Hide Translation' : 'Show Translation'}
+                              </button>
+                              {showTranslation && (
+                                <div className="text-sm text-slate-400 italic max-w-md mx-auto">
+                                  <ReactMarkdown>{currentPromptData.translation}</ReactMarkdown>
+                                </div>
+                              )}
                             </div>
                           )}
-                        </div>
-                      )}
 
-                      {currentSlangTerms.length > 0 && (
-                        <div className="flex flex-wrap justify-center gap-2 mt-4">
-                          {currentSlangTerms.map((t, i) => (
-                            <div key={i} className="px-3 py-1 bg-amber-50 border border-amber-100 rounded-lg text-xs">
-                              <span className="font-bold text-amber-700">{t.term}</span>: <span className="text-slate-600">{t.meaning}</span>
+                          {currentSlangTerms.length > 0 && (
+                            <div className="flex flex-wrap justify-center gap-2 mt-4">
+                              {currentSlangTerms.map((t, i) => (
+                                <div key={i} className="px-3 py-1 bg-amber-50 border border-amber-100 rounded-lg text-xs">
+                                  <span className="font-bold text-amber-700">{t.term}</span>: <span className="text-slate-600">{t.meaning}</span>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
-                      )}
-                      {currentPrompt && (
-                        <button
-                          onClick={playPrompt}
-                          disabled={isPlayingPrompt}
-                          className={`p-3 rounded-full transition-all ${isPlayingPrompt ? 'bg-indigo-100 text-indigo-400' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-100'}`}
-                        >
-                          {isPlayingPrompt ? <Loader2 className="animate-spin" size={20} /> : <Volume2 size={20} />}
-                        </button>
+                          )}
+                          {currentPrompt && (
+                            <button
+                              onClick={playPrompt}
+                              disabled={isPlayingPrompt}
+                              className={`p-3 rounded-full transition-all ${isPlayingPrompt ? 'bg-indigo-100 text-indigo-400' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-100'}`}
+                            >
+                              {isPlayingPrompt ? <Loader2 className="animate-spin" size={20} /> : <Volume2 size={20} />}
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
 
@@ -991,11 +1478,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
               <div className="space-y-6">
                 <div className="flex items-center justify-between">
                   <h2 className="text-2xl font-bold text-slate-900">Slang Bank</h2>
-                  <div className="text-sm font-medium text-slate-500">{slangBank.filter(s => s.language === localProfile.targetLanguage).length} terms learned</div>
+                  <div className="text-sm font-medium text-slate-500">{safeSlangBank.filter(s => s.language === localProfile.targetLanguage).length} terms learned</div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {slangBank.filter(s => s.language === localProfile.targetLanguage).map((slang) => (
+                  {safeSlangBank.filter(s => s.language === localProfile.targetLanguage).map((slang) => (
                     <div key={slang.id} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-3">
                       <div className="flex items-center justify-between">
                         <span className="text-xl font-bold text-indigo-600">{slang.term}</span>
@@ -1010,7 +1497,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                       </div>
                     </div>
                   ))}
-                  {slangBank.filter(s => s.language === localProfile.targetLanguage).length === 0 && (
+                  {safeSlangBank.filter(s => s.language === localProfile.targetLanguage).length === 0 && (
                     <div className="col-span-full py-20 text-center space-y-4">
                       <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center text-slate-400 mx-auto">
                         <Zap size={32} />
@@ -1020,6 +1507,411 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                   )}
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {view === 'flashcards' && (
+            <motion.div 
+              key="flashcards"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-8"
+            >
+              <div className="flex items-center justify-between">
+                <button 
+                  onClick={() => {
+                    setView('home');
+                    setFlashcardSubView('library');
+                  }}
+                  className="flex items-center gap-2 text-slate-500 font-medium hover:text-slate-900 transition-colors"
+                >
+                  <ChevronLeft size={20} /> Back to Dashboard
+                </button>
+                
+                {flashcardSubView === 'library' && (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => startStudySession()}
+                      disabled={flashcards.filter(f => f.language === localProfile.targetLanguage && f.consecutiveCorrect < 3).length === 0}
+                      className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all disabled:opacity-50"
+                    >
+                      <PlayCircle size={16} />
+                      Study Deck
+                    </button>
+                    <button
+                      onClick={() => setIsAddingFlashcard(true)}
+                      className="flex items-center gap-2 px-4 py-2 bg-white text-slate-600 border border-slate-200 rounded-xl font-bold text-sm hover:bg-slate-50 transition-all"
+                    >
+                      <Plus size={16} />
+                      Add Card
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {flashcardSubView === 'library' ? (
+                <div className="space-y-6">
+                  <div className="flex flex-col gap-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-2xl font-bold text-slate-900">Flashcards</h2>
+                      <div className="text-sm font-medium text-slate-500">
+                        {flashcards.filter(f => f.language === localProfile.targetLanguage).length} cards
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      {['All', 'Noun', 'Verb', 'Adjective', 'Adverb', 'Expression', 'Slang'].map(type => (
+                        <button
+                          key={type}
+                          onClick={() => setFlashcardFilter(type)}
+                          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                            flashcardFilter === type 
+                              ? 'bg-indigo-600 text-white shadow-md' 
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {type}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-4">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Sort By:</label>
+                      <div className="flex bg-slate-100 p-1 rounded-xl">
+                        {(['date', 'practice', 'alphabetical'] as const).map(sort => (
+                          <button
+                            key={sort}
+                            onClick={() => setFlashcardSort(sort)}
+                            className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${
+                              flashcardSort === sort 
+                                ? 'bg-white text-indigo-600 shadow-sm' 
+                                : 'text-slate-500 hover:text-slate-700'
+                            }`}
+                          >
+                            {sort}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {flashcards
+                      .filter(f => f.language === localProfile.targetLanguage)
+                      .filter(f => flashcardFilter === 'All' || f.wordType?.toLowerCase() === flashcardFilter.toLowerCase())
+                      .sort((a, b) => {
+                        if (flashcardSort === 'date') return new Date(b.dateAdded).getTime() - new Date(a.dateAdded).getTime();
+                        if (flashcardSort === 'practice') return b.practiceCount - a.practiceCount;
+                        return a.word.localeCompare(b.word);
+                      })
+                      .map((card) => (
+                      <div key={card.id} className="space-y-3">
+                        <div className="perspective-1000 h-64">
+                          <motion.div
+                            animate={{ rotateY: isFlipped[card.id] ? 180 : 0 }}
+                            transition={{ duration: 0.6, type: 'spring', stiffness: 260, damping: 20 }}
+                            className="relative w-full h-full preserve-3d cursor-pointer"
+                            onClick={() => setIsFlipped(prev => ({ ...prev, [card.id]: !prev[card.id] }))}
+                          >
+                            {/* Front */}
+                            <div className="absolute inset-0 backface-hidden bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-xl flex flex-col items-center justify-center text-center">
+                              <div className="absolute top-6 left-6 px-2 py-1 bg-slate-50 rounded-lg text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                {card.wordType}
+                              </div>
+                              {card.consecutiveCorrect >= 3 && (
+                                <div className="absolute top-6 right-6 text-emerald-500">
+                                  <CheckCircle2 size={16} />
+                                </div>
+                              )}
+                              <span className="text-3xl font-bold text-slate-900">{card.word}</span>
+                              <div className="mt-4 text-slate-400 flex items-center gap-2 text-xs font-bold uppercase tracking-widest">
+                                <Rotate3d size={14} /> Tap to flip
+                              </div>
+                              <div className="absolute bottom-6 flex items-center gap-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                <div className="flex items-center gap-1">
+                                  <History size={12} /> {card.practiceCount} practices
+                                </div>
+                                <div>
+                                  {new Date(card.dateAdded).toLocaleDateString()}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Back */}
+                            <div 
+                              className="absolute inset-0 backface-hidden bg-indigo-600 p-8 rounded-[2.5rem] border border-indigo-500 shadow-xl flex flex-col items-center justify-center text-center text-white"
+                              style={{ transform: 'rotateY(180deg)' }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="absolute top-6 right-6 flex items-center gap-2">
+                                <span className="text-[10px] font-bold uppercase tracking-widest opacity-60">
+                                  {showTargetDefinition[card.id] ? localProfile.targetLanguage : 'English'}
+                                </span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleDefinitionLanguage(card.id);
+                                  }}
+                                  className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition-colors"
+                                >
+                                  <LanguagesIcon size={16} />
+                                </button>
+                              </div>
+                              
+                              <p className="text-xl font-medium leading-relaxed">
+                                {showTargetDefinition[card.id] ? (
+                                  card.definitionTarget || (
+                                    <div className="flex gap-1.5 justify-center items-center h-8">
+                                      {[0, 1, 2].map((i) => (
+                                        <motion.div
+                                          key={i}
+                                          animate={{ opacity: [0.3, 1, 0.3], scale: [0.8, 1.2, 0.8] }}
+                                          transition={{ repeat: Infinity, duration: 0.8, delay: i * 0.15 }}
+                                          className="w-2 h-2 bg-white rounded-full"
+                                        />
+                                      ))}
+                                    </div>
+                                  )
+                                ) : card.definitionEn}
+                              </p>
+                              
+                              <button
+                                className="mt-6 text-indigo-200 flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setIsFlipped(prev => ({ ...prev, [card.id]: false }));
+                                }}
+                              >
+                                <Rotate3d size={14} /> Back to word
+                              </button>
+                            </div>
+                          </motion.div>
+                        </div>
+                        
+                        {/* Frequency Slider */}
+                        <div className="px-6 py-4 bg-white rounded-2xl border border-slate-100 shadow-sm space-y-2">
+                          <div className="flex justify-between items-center">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Practice Frequency</label>
+                            <span className="text-xs font-bold text-indigo-600">{card.frequency}x</span>
+                          </div>
+                          <input 
+                            type="range" 
+                            min="1" 
+                            max="5" 
+                            step="1"
+                            value={card.frequency}
+                            onChange={(e) => updateFlashcardFrequency(card.id, parseInt(e.target.value))}
+                            className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                          />
+                          <div className="flex justify-between text-[8px] font-bold text-slate-300 uppercase tracking-tighter">
+                            <span>Rarely</span>
+                            <span>Frequently</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {flashcards.filter(f => f.language === localProfile.targetLanguage).length === 0 && (
+                    <div className="py-20 text-center space-y-4">
+                      <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center text-slate-400 mx-auto">
+                        <Rotate3d size={32} />
+                      </div>
+                      <p className="text-slate-500 font-medium">No flashcards yet. Words you learn will appear here!</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="max-w-xl mx-auto space-y-8">
+                  {studySession && !studySession.isComplete ? (
+                    <div className="space-y-8">
+                      <div className="flex items-center justify-between px-2">
+                        <div className="space-y-1">
+                          <h2 className="text-2xl font-bold text-slate-900">Study Session</h2>
+                          <p className="text-slate-500 text-sm font-medium">
+                            {studySession.maxCards - studySession.currentIndex} cards remaining
+                          </p>
+                        </div>
+                        <div className="flex bg-slate-100 p-1 rounded-xl">
+                          {[5, 10, 15, 20].map(num => (
+                            <button
+                              key={num}
+                              onClick={() => setStudySettings({ maxCards: num })}
+                              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${
+                                studySettings.maxCards === num 
+                                  ? 'bg-white text-indigo-600 shadow-sm' 
+                                  : 'text-slate-500 hover:text-slate-700'
+                              }`}
+                            >
+                              {num}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="relative h-96">
+                        {studySession.cards[studySession.currentIndex] && (
+                          <motion.div
+                            key={studySession.cards[studySession.currentIndex].id}
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="perspective-1000 h-full"
+                          >
+                            <motion.div
+                              animate={{ rotateY: isFlipped['study'] ? 180 : 0 }}
+                              transition={{ duration: 0.6, type: 'spring', stiffness: 260, damping: 20 }}
+                              className="relative w-full h-full preserve-3d cursor-pointer"
+                              onClick={() => setIsFlipped(prev => ({ ...prev, study: !prev.study }))}
+                            >
+                              {/* Front */}
+                              <div className="absolute inset-0 backface-hidden bg-white p-12 rounded-[3rem] border border-slate-100 shadow-2xl flex flex-col items-center justify-center text-center">
+                                <div className="absolute top-8 left-8 px-3 py-1 bg-slate-50 rounded-lg text-xs font-bold text-slate-400 uppercase tracking-widest">
+                                  {studySession.cards[studySession.currentIndex].wordType}
+                                </div>
+                                <span className="text-5xl font-bold text-slate-900">
+                                  {studySession.cards[studySession.currentIndex].word}
+                                </span>
+                                <div className="mt-8 text-slate-400 flex items-center gap-2 text-sm font-bold uppercase tracking-widest">
+                                  <Rotate3d size={18} /> Tap to flip
+                                </div>
+                              </div>
+
+                              {/* Back */}
+                              <div 
+                                className="absolute inset-0 backface-hidden bg-indigo-600 p-12 rounded-[3rem] border border-indigo-500 shadow-2xl flex flex-col items-center justify-center text-center text-white"
+                                style={{ transform: 'rotateY(180deg)' }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <p className="text-3xl font-medium leading-relaxed">
+                                  {studySession.cards[studySession.currentIndex].definitionEn}
+                                </p>
+                                
+                                <div className="mt-12 flex gap-6">
+                                  <button
+                                    onClick={() => handleStudyFeedback(studySession.cards[studySession.currentIndex].id, false)}
+                                    className="w-16 h-16 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center text-white transition-all hover:scale-110"
+                                  >
+                                    <ThumbsDown size={28} />
+                                  </button>
+                                  <button
+                                    onClick={() => handleStudyFeedback(studySession.cards[studySession.currentIndex].id, true)}
+                                    className="w-16 h-16 bg-white rounded-full flex items-center justify-center text-indigo-600 transition-all hover:scale-110 shadow-lg"
+                                  >
+                                    <ThumbsUp size={28} />
+                                  </button>
+                                </div>
+                              </div>
+                            </motion.div>
+                          </motion.div>
+                        )}
+                      </div>
+
+                      <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${(studySession.currentIndex / studySession.maxCards) * 100}%` }}
+                          className="h-full bg-indigo-600"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="bg-white p-12 rounded-[3rem] border border-slate-100 shadow-xl text-center space-y-8"
+                    >
+                      <div className="w-24 h-24 bg-emerald-50 rounded-full flex items-center justify-center text-emerald-600 mx-auto">
+                        <Trophy size={48} />
+                      </div>
+                      <div className="space-y-2">
+                        <h3 className="text-3xl font-bold text-slate-900">Session Complete!</h3>
+                        <p className="text-slate-500 font-medium">Great job studying your vocabulary today.</p>
+                      </div>
+                      <button
+                        onClick={() => setFlashcardSubView('library')}
+                        className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-bold text-lg shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all"
+                      >
+                        Back to Library
+                      </button>
+                    </motion.div>
+                  )}
+                </div>
+              )}
+
+              {/* Add Card Modal */}
+              <AnimatePresence>
+                {isAddingFlashcard && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
+                    onClick={() => setIsAddingFlashcard(false)}
+                  >
+                    <motion.div
+                      initial={{ scale: 0.9, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.9, opacity: 0 }}
+                      className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-slate-100 max-w-md w-full space-y-6"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-2xl font-bold text-slate-900">New Flashcard</h3>
+                        <button onClick={() => setIsAddingFlashcard(false)} className="text-slate-400 hover:text-slate-600">
+                          <ChevronLeft size={24} className="rotate-90" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div className="space-y-2">
+                          <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Word or Phrase</label>
+                          <input
+                            type="text"
+                            value={newFlashcard.word}
+                            onChange={e => setNewFlashcard({ ...newFlashcard, word: e.target.value })}
+                            placeholder="Enter word in target language"
+                            className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-indigo-500 transition-all"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Word Type</label>
+                          <select
+                            value={newFlashcard.wordType}
+                            onChange={e => setNewFlashcard({ ...newFlashcard, wordType: e.target.value })}
+                            className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-indigo-500 transition-all"
+                          >
+                            <option value="noun">Noun</option>
+                            <option value="verb">Verb</option>
+                            <option value="adjective">Adjective</option>
+                            <option value="adverb">Adverb</option>
+                            <option value="expression">Expression</option>
+                            <option value="slang">Slang</option>
+                          </select>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Definition (English)</label>
+                          <textarea
+                            value={newFlashcard.definitionEn}
+                            onChange={e => setNewFlashcard({ ...newFlashcard, definitionEn: e.target.value })}
+                            placeholder="Enter English definition"
+                            rows={3}
+                            className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl focus:ring-2 focus:ring-indigo-500 transition-all resize-none"
+                          />
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleManualAddFlashcard}
+                        disabled={!newFlashcard.word || !newFlashcard.definitionEn}
+                        className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all disabled:opacity-50"
+                      >
+                        Add to Bank
+                      </button>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           )}
 
@@ -1038,7 +1930,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                 </div>
 
                 <div className="h-[300px] w-full">
-                  {sessions.length > 0 ? (
+                  {safeSessions.length > 0 ? (
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={chartData}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -1101,7 +1993,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
             >
               <h2 className="text-2xl font-bold text-slate-900 px-1">Practice History</h2>
               <div className="space-y-4">
-                {sessions.map((session) => (
+                {safeSessions.map((session) => (
                   <div key={session.id} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-4">
                     <div className="flex items-center justify-between">
                       <div className="space-y-1">
@@ -1129,7 +2021,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
                     )}
                   </div>
                 ))}
-                {sessions.length === 0 && (
+                {safeSessions.length === 0 && (
                   <div className="text-center py-12 text-slate-400">
                     Your practice history will appear here.
                   </div>
@@ -1156,6 +2048,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ profile, sessions, onNewSe
           >
             <BarChart3 size={24} />
             <span className="text-[10px] font-bold uppercase tracking-widest">Reports</span>
+          </button>
+          <button 
+            onClick={() => setView('flashcards')}
+            className={`flex flex-col items-center gap-1 transition-colors ${view === 'flashcards' ? 'text-indigo-600' : 'text-slate-400'}`}
+          >
+            <Rotate3d size={24} />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Cards</span>
           </button>
           <button 
             onClick={() => setView('history')}
